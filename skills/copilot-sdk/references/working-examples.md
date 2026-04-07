@@ -1,150 +1,110 @@
-# Complete Working Examples
+# Working Examples
 
-**Critical:** Register event handlers **before** calling `send()` to capture all events.
+## Before you start
 
-## TypeScript/Node.js
+- Use an explicit permission handler for real sessions.
+- Register streaming/event handlers before `send()`.
+- Prefer `disconnect()` over `destroy()`.
+- If you want resumable sessions, provide your own `sessionId`.
+
+## Minimal chat examples
+
+### TypeScript / Node.js
 
 ```typescript
-import { CopilotClient, SessionEvent } from "@github/copilot-sdk";
+import { CopilotClient, approveAll } from "@github/copilot-sdk";
 
-async function main() {
-  const client = new CopilotClient();
-  await client.start();
+const client = new CopilotClient();
+await client.start();
 
-  const session = await client.createSession({
-    model: "gpt-5",
-    streaming: true,
-  });
+const session = await client.createSession({
+  model: "gpt-5",
+  streaming: true,
+  onPermissionRequest: approveAll,
+});
 
-  const done = new Promise<string>((resolve) => {
-    let content = "";
+session.on("assistant.message_delta", (event) => {
+  process.stdout.write(event.data.deltaContent ?? "");
+});
 
-    // Register handler BEFORE send()
-    session.on((event: SessionEvent) => {
-      if (event.type === "assistant.message_delta") {
-        process.stdout.write(event.data.deltaContent ?? "");
-      }
-      if (event.type === "assistant.message") {
-        content = event.data.content ?? "";
-      }
-      if (event.type === "session.idle") {
-        resolve(content);
-      }
-    });
-  });
+await session.sendAndWait({ prompt: "What is 2+2?" });
 
-  await session.send({ prompt: "What is 2 + 2?" });
-  const response = await done;
-
-  console.log("\n\nFinal response:", response);
-
-  await session.destroy();
-  await client.stop();
-}
-
-main();
+await session.disconnect();
+await client.stop();
 ```
 
-## Python
+### Python
 
 ```python
 import asyncio
 from copilot import CopilotClient
+from copilot.session import PermissionHandler
 
 async def main():
-    client = CopilotClient()
-    await client.start()
+    async with CopilotClient() as client:
+        session = await client.create_session(
+            model="gpt-5",
+            streaming=True,
+            on_permission_request=PermissionHandler.approve_all,
+        )
 
-    session = await client.create_session({
-        "model": "gpt-5",
-        "streaming": True,
-    })
+        def on_event(event):
+            if event.type.value == "assistant.message_delta":
+                print(event.data.delta_content or "", end="", flush=True)
 
-    done = asyncio.Event()
-    final_content = ""
-
-    def on_event(event):
-        nonlocal final_content
-        # Access type via .value for the string
-        event_type = event.type.value
-
-        if event_type == "assistant.message_delta":
-            print(event.data.delta_content, end="", flush=True)
-        elif event_type == "assistant.message":
-            final_content = event.data.content
-        elif event_type == "session.idle":
-            done.set()
-
-    # Register handler BEFORE send()
-    session.on(on_event)
-
-    await session.send({"prompt": "What is 2 + 2?"})
-    await done.wait()
-
-    print(f"\n\nFinal response: {final_content}")
-
-    await session.destroy()
-    await client.stop()
+        session.on(on_event)
+        await session.send_and_wait("What is 2+2?")
+        await session.disconnect()
 
 asyncio.run(main())
 ```
 
-## Go
+### Go
 
 ```go
 package main
 
 import (
+    "context"
     "fmt"
+    "log"
+
     copilot "github.com/github/copilot-sdk/go"
 )
 
 func main() {
+    ctx := context.Background()
     client := copilot.NewClient(nil)
-    if err := client.Start(); err != nil {
-        panic(err)
+    if err := client.Start(ctx); err != nil {
+        log.Fatal(err)
     }
     defer client.Stop()
 
-    session, err := client.CreateSession(&copilot.SessionConfig{
-        Model:     "gpt-5",
-        Streaming: true,
+    session, err := client.CreateSession(ctx, &copilot.SessionConfig{
+        Model:               "gpt-5",
+        Streaming:           true,
+        OnPermissionRequest: copilot.PermissionHandler.ApproveAll,
     })
     if err != nil {
-        panic(err)
+        log.Fatal(err)
     }
-    defer session.Destroy()
+    defer session.Disconnect()
 
-    done := make(chan string)
-    var finalContent string
-
-    // Register handler BEFORE Send()
     session.On(func(event copilot.SessionEvent) {
-        switch event.Type {
-        case "assistant.message_delta":
-            if event.Data.DeltaContent != nil {
-                fmt.Print(*event.Data.DeltaContent)
-            }
-        case "assistant.message":
-            if event.Data.Content != nil {
-                finalContent = *event.Data.Content
-            }
-        case "session.idle":
-            done <- finalContent
+        if event.Type == "assistant.message_delta" && event.Data.DeltaContent != nil {
+            fmt.Print(*event.Data.DeltaContent)
         }
     })
 
-    _, err = session.Send(copilot.MessageOptions{Prompt: "What is 2 + 2?"})
-    if err != nil {
-        panic(err)
+    if _, err := session.SendAndWait(ctx, copilot.MessageOptions{
+        Prompt: "What is 2+2?",
+    }); err != nil {
+        log.Fatal(err)
     }
-
-    response := <-done
-    fmt.Printf("\n\nFinal response: %s\n", response)
 }
 ```
 
-## .NET (C#)
+### .NET
 
 ```csharp
 using GitHub.Copilot.SDK;
@@ -155,119 +115,223 @@ await client.StartAsync();
 await using var session = await client.CreateSessionAsync(new SessionConfig
 {
     Model = "gpt-5",
-    Streaming = true
+    Streaming = true,
+    OnPermissionRequest = PermissionHandler.ApproveAll,
 });
 
-var done = new TaskCompletionSource<string>();
-var finalContent = "";
-
-// Register handler BEFORE SendAsync()
 session.On(evt =>
 {
-    switch (evt)
+    if (evt is AssistantMessageDeltaEvent delta)
     {
-        case AssistantMessageDeltaEvent delta:
-            Console.Write(delta.Data.DeltaContent);
-            break;
-        case AssistantMessageEvent msg:
-            finalContent = msg.Data.Content ?? "";
-            break;
-        case SessionIdleEvent:
-            done.SetResult(finalContent);
-            break;
+        Console.Write(delta.Data.DeltaContent);
     }
 });
 
-await session.SendAsync(new MessageOptions { Prompt = "What is 2 + 2?" });
-var response = await done.Task;
-
-Console.WriteLine($"\n\nFinal response: {response}");
+await session.SendAndWaitAsync(new MessageOptions
+{
+    Prompt = "What is 2+2?"
+});
 ```
 
----
+### Java
 
-# Custom Tools
+```java
+import com.github.copilot.sdk.CopilotClient;
+import com.github.copilot.sdk.events.AssistantMessageDeltaEvent;
+import com.github.copilot.sdk.json.MessageOptions;
+import com.github.copilot.sdk.json.PermissionHandler;
+import com.github.copilot.sdk.json.SessionConfig;
 
-The SDK allows defining tools that Copilot can invoke during conversations.
+try (var client = new CopilotClient()) {
+    client.start().get();
 
-## TypeScript (using Zod)
+    var session = client.createSession(
+        new SessionConfig()
+            .setModel("claude-sonnet-4.5")
+            .setStreaming(true)
+            .setOnPermissionRequest(PermissionHandler.APPROVE_ALL)
+    ).get();
+
+    session.on(AssistantMessageDeltaEvent.class, event ->
+        System.out.print(event.getData().deltaContent())
+    );
+
+    session.sendAndWait(new MessageOptions().setPrompt("What is 2+2?")).get();
+}
+```
+
+## Custom tool examples
+
+### TypeScript
 
 ```typescript
-import { defineTool } from "@github/copilot-sdk";
 import { z } from "zod";
+import { CopilotClient, approveAll, defineTool } from "@github/copilot-sdk";
 
-const myTool = defineTool("lookup_issue", {
-  description: "Fetch issue details from tracker",
-  parameters: z.object({
-    id: z.string().describe("Issue identifier"),
-  }),
-  handler: async ({ id }) => {
-    // Implementation
-    return { status: "found", title: "Bug report" };
-  },
-});
+const client = new CopilotClient();
+await client.start();
 
-// Use in session
 const session = await client.createSession({
   model: "gpt-5",
-  tools: [myTool],
+  onPermissionRequest: approveAll,
+  tools: [
+    defineTool("lookup_issue", {
+      description: "Fetch issue details from our tracker",
+      parameters: z.object({
+        id: z.string().describe("Issue identifier"),
+      }),
+      handler: async ({ id }) => ({ id, status: "open" }),
+    }),
+  ],
 });
 ```
 
-## Python (using Pydantic)
+### Python
 
 ```python
 from pydantic import BaseModel, Field
-from copilot import CopilotClient, define_tool
+from copilot import define_tool
 
 class IssueParams(BaseModel):
     id: str = Field(description="Issue identifier")
 
-@define_tool(description="Fetch issue details from tracker")
+@define_tool(description="Fetch issue details from our tracker")
 async def lookup_issue(params: IssueParams) -> dict:
-    return {"status": "found", "title": "Bug report"}
-
-# Use in session
-session = await client.create_session({
-    "model": "gpt-5",
-    "tools": [lookup_issue],
-})
+    return {"id": params.id, "status": "open"}
 ```
 
-## Go (using DefineTool)
+### Go
 
 ```go
 type IssueParams struct {
-    ID string `json:"id" description:"Issue identifier"`
+    ID string `json:"id" jsonschema:"Issue identifier"`
 }
 
-tool := copilot.DefineTool("lookup_issue", "Fetch issue details from tracker",
+lookupIssue := copilot.DefineTool(
+    "lookup_issue",
+    "Fetch issue details from our tracker",
     func(params IssueParams, inv copilot.ToolInvocation) (any, error) {
-        return map[string]string{"status": "found", "title": "Bug report"}, nil
-    })
-
-// Use in session
-session, _ := client.CreateSession(&copilot.SessionConfig{
-    Model: "gpt-5",
-    Tools: []copilot.Tool{tool},
-})
+        return map[string]string{"id": params.ID, "status": "open"}, nil
+    },
+)
 ```
 
-## .NET (using AIFunctionFactory)
+### .NET
 
 ```csharp
 using Microsoft.Extensions.AI;
 
-var tool = AIFunctionFactory.Create(
-    (string id) => new { Status = "found", Title = "Bug report" },
+var lookupIssue = AIFunctionFactory.Create(
+    (string id) => new { Id = id, Status = "open" },
     "lookup_issue",
-    "Fetch issue details from tracker"
+    "Fetch issue details from our tracker"
 );
+```
 
-// Use in session
-var session = await client.CreateSessionAsync(new SessionConfig
-{
-    Model = "gpt-5",
-    Tools = new[] { tool }
+### Java
+
+```java
+// Java SDK support lives in github/copilot-sdk-java.
+// Follow its current documentation for tool wiring and event classes:
+// https://github.com/github/copilot-sdk-java
+```
+
+## Resume example
+
+### TypeScript
+
+```typescript
+const session = await client.createSession({
+  sessionId: "user-123-review-42",
+  model: "gpt-5.2-codex",
+  onPermissionRequest: approveAll,
+});
+
+await session.sendAndWait({ prompt: "Review the repository" });
+await session.disconnect();
+
+const resumed = await client.resumeSession("user-123-review-42", {
+  onPermissionRequest: approveAll,
+});
+
+await resumed.sendAndWait({ prompt: "Continue from where you left off" });
+```
+
+### Important resume note for BYOK
+
+If the session uses a custom `provider`, pass that provider again when resuming. API keys and bearer tokens are not persisted to disk.
+
+## Small but important current rules
+
+### Overriding a built-in tool requires explicit opt-in
+
+**TypeScript**
+
+```typescript
+import { z } from "zod";
+import { defineTool } from "@github/copilot-sdk";
+
+defineTool("edit_file", {
+  description: "Custom editor",
+  parameters: z.object({ path: z.string(), content: z.string() }),
+  overridesBuiltInTool: true,
+  handler: async () => "ok",
 });
 ```
+
+**Python**
+
+```python
+from pydantic import BaseModel, Field
+from copilot import define_tool
+
+class EditFileParams(BaseModel):
+    path: str = Field(description="File path")
+    content: str = Field(description="New file content")
+
+@define_tool(
+    name="edit_file",
+    description="Custom editor",
+    overrides_built_in_tool=True,
+)
+async def edit_file(params: EditFileParams) -> str:
+    return "ok"
+```
+
+**Go**
+
+```go
+type EditFileParams struct {
+    Path string `json:"path" jsonschema:"File path"`
+    Content string `json:"content" jsonschema:"New file content"`
+}
+
+editFile := copilot.DefineTool("edit_file", "Custom editor",
+    func(params EditFileParams, inv copilot.ToolInvocation) (any, error) {
+        return "ok", nil
+    })
+editFile.OverridesBuiltInTool = true
+```
+
+**.NET**
+
+```csharp
+using Microsoft.Extensions.AI;
+using System.Collections.Generic;
+
+var editFile = AIFunctionFactory.Create(
+    (string path, string content) => "ok",
+    "edit_file",
+    "Custom editor",
+    new AIFunctionFactoryOptions
+    {
+        AdditionalProperties = new Dictionary<string, object?> { ["is_override"] = true }
+    }
+);
+```
+
+### Other advanced patterns worth remembering
+
+- Image input supports file and blob attachments; vision-capable models are required.
+- Mid-turn steering uses `mode: "immediate"` and queueing uses `mode: "enqueue"`.
+- Telemetry uses `TelemetryConfig` and can export to OTLP or file.

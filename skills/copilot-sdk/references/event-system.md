@@ -1,91 +1,179 @@
 # Event System
 
-## Event Lifecycle
+The Copilot SDK emits a rich stream of session events. Event names and payloads have expanded since early preview builds, so older examples are often incomplete.
 
-Events fire in this typical sequence for a single request:
+## Event envelope
 
-```
-1. user.message              → User prompt recorded
-2. assistant.turn_start      → Model begins processing
-3. session.usage_info        → Token/usage metadata
-4. assistant.message_delta   → Streaming chunks (if enabled, repeats)
-5. assistant.message         → Final complete response
-6. assistant.reasoning       → Chain-of-thought (if available)
-7. assistant.turn_end        → Model finished processing
-8. session.idle              → Session ready for next prompt
-```
+Every event includes the same top-level structure:
 
-When tools are invoked, additional events appear:
-```
-   tool.execution_start      → Tool invocation began
-   tool.execution_end        → Tool execution completed
-```
+| Field | Meaning |
+| --- | --- |
+| `id` | Event UUID |
+| `timestamp` | ISO 8601 timestamp |
+| `parentId` | Previous event in the chain, if any |
+| `ephemeral` | `true` for transient events that are not persisted |
+| `type` | Event name |
+| `data` | Event-specific payload |
 
-## SessionEvent Structure
+## Subscription patterns
 
-Events are wrapped in a `SessionEvent` object (exact field names vary by language):
+### TypeScript
 
-```
-SessionEvent {
-  type: string | enum       // Event type identifier
-  data: {                   // Event-specific payload
-    content?: string        // Full text (final events)
-    deltaContent?: string   // Incremental text (delta events)
-    // Other fields vary by event type
-  }
-  id?: string               // Event identifier
-  timestamp?: string        // When event occurred
-}
+```typescript
+session.on((event) => {
+  console.log(event.type, event.data);
+});
+
+session.on("assistant.message_delta", (event) => {
+  process.stdout.write(event.data.deltaContent ?? "");
+});
 ```
 
-**Important access patterns:**
-- TypeScript: `event.type` (string), `event.data.content`, `event.data.deltaContent`
-- Python: `event.type.value` (enum requires `.value`), `event.data.content`, `event.data.delta_content`
-- Go: `event.Type` (string), `*event.Data.Content`, `*event.Data.DeltaContent` (pointers)
-- .NET: Pattern match on event class, then `evt.Data.Content`, `evt.Data.DeltaContent`
+### Python
 
-## Event Types Reference
+```python
+from copilot.generated.session_events import SessionEventType
 
-| Event Type | Purpose | Key Data Fields |
-|------------|---------|-----------------|
-| `user.message` | User input recorded | `content` |
-| `assistant.message` | Complete response | `content` |
-| `assistant.message_delta` | Streaming chunk | `deltaContent` / `delta_content` |
-| `assistant.reasoning` | Chain-of-thought | `content` |
-| `assistant.reasoning_delta` | Reasoning chunk | `deltaContent` / `delta_content` |
-| `assistant.turn_start` | Processing began | — |
-| `assistant.turn_end` | Processing finished | — |
-| `tool.execution_start` | Tool invoked | tool name, parameters |
-| `tool.execution_end` | Tool completed | result |
-| `session.idle` | Ready for next prompt | — |
-| `session.usage_info` | Token/usage data | usage metrics |
+def handle(event):
+    if event.type == SessionEventType.ASSISTANT_MESSAGE_DELTA:
+        print(event.data.delta_content, end="", flush=True)
 
-## Streaming Behavior
+session.on(handle)
+```
 
-The `streaming` configuration option controls **when** content arrives, not **which** events fire:
+### Go
 
-| Setting | Behavior |
-|---------|----------|
-| `streaming: false` (default) | Content arrives all at once in `assistant.message` |
-| `streaming: true` | Content arrives incrementally via `assistant.message_delta` events |
+```go
+session.On(func(event copilot.SessionEvent) {
+    if event.Type == "assistant.message_delta" && event.Data.DeltaContent != nil {
+        fmt.Print(*event.Data.DeltaContent)
+    }
+})
+```
 
-**Important:** Final events (`assistant.message`, `assistant.reasoning`) **always fire** regardless of streaming setting. They contain the complete accumulated content.
+### .NET
 
-To build a response progressively:
-1. Accumulate `deltaContent` from each `assistant.message_delta` event
-2. Or wait for `assistant.message` which contains the complete text
+```csharp
+session.On(evt =>
+{
+    if (evt is AssistantMessageDeltaEvent delta)
+    {
+        Console.Write(delta.Data.DeltaContent);
+    }
+});
+```
 
----
+### Java
 
-# Language-Specific Conventions
+```java
+session.on(AssistantMessageDeltaEvent.class, event -> {
+    System.out.print(event.getData().deltaContent());
+});
+```
 
-| Concept | TypeScript | Python | Go | .NET |
-|---------|------------|--------|----|----|
-| Client class | `CopilotClient` | `CopilotClient` | `Client` | `CopilotClient` |
-| Create session | `createSession()` | `create_session()` | `CreateSession()` | `CreateSessionAsync()` |
-| Send message | `send()` / `sendAndWait()` | `send()` / `send_and_wait()` | `Send()` | `SendAsync()` |
-| Session config | `{ model, streaming }` | `{"model", "streaming"}` | `&SessionConfig{}` | `new SessionConfig{}` |
-| Event handler | `session.on(fn)` | `session.on(fn)` | `session.On(fn)` | `session.On(fn)` |
-| Delta content | `deltaContent` | `delta_content` | `DeltaContent` | `DeltaContent` |
-| System message | `systemMessage` | `system_message` | `SystemMessage` | `SystemMessage` |
-| CLI path option | `cliPath` | `cli_path` | `CLIPath` | `CliPath` |
+## Typical turn flow
+
+Exact order varies, but a normal streamed turn often looks like this:
+
+1. `user.message`
+2. `assistant.turn_start`
+3. `assistant.intent`
+4. `assistant.reasoning_delta` / `assistant.reasoning`
+5. `assistant.message_delta`
+6. `tool.execution_start`
+7. `tool.execution_partial_result` / `tool.execution_progress`
+8. `tool.execution_complete`
+9. `assistant.message`
+10. `assistant.turn_end`
+11. `session.idle`
+12. `session.usage_info`
+
+For a completed task you may also see `session.task_complete`.
+
+## High-signal event types
+
+### Assistant events
+
+| Event | Purpose | Key fields |
+| --- | --- | --- |
+| `assistant.turn_start` | Start of a model turn | `turnId`, `interactionId` |
+| `assistant.intent` | Human-readable current intent | `intent` |
+| `assistant.reasoning` | Full reasoning block | `reasoningId`, `content` |
+| `assistant.reasoning_delta` | Streaming reasoning chunk | `reasoningId`, `deltaContent` |
+| `assistant.message` | Final assistant message | `messageId`, `content`, `toolRequests`, `reasoningText` |
+| `assistant.message_delta` | Streaming response chunk | `messageId`, `deltaContent` |
+| `assistant.turn_end` | End of a model turn | `turnId` |
+| `assistant.usage` | Per-call token/cost metadata | `model`, `inputTokens`, `outputTokens`, `cost`, `duration` |
+| `assistant.streaming_delta` | Network-level stream progress | `totalResponseSizeBytes` |
+
+### Tool events
+
+| Event | Purpose | Key fields |
+| --- | --- | --- |
+| `tool.execution_start` | Tool started | `toolCallId`, `toolName`, `arguments` |
+| `tool.execution_partial_result` | Streaming tool output | `toolCallId`, `partialOutput` |
+| `tool.execution_progress` | Progress message | `toolCallId`, `progressMessage` |
+| `tool.execution_complete` | Tool finished | `toolCallId`, `success`, `result`, `error` |
+| `tool.user_requested` | Tool execution was explicitly user-requested | tool call metadata |
+
+### Session lifecycle events
+
+| Event | Purpose | Notes |
+| --- | --- | --- |
+| `session.idle` | Turn is done and session can accept more work | Best completion signal |
+| `session.error` | Session-level error | Check `data` for details |
+| `session.compaction_start` / `session.compaction_complete` | Infinite-session compaction lifecycle | Relevant for long-running sessions |
+| `session.title_changed` | Session title updated | Useful for UIs |
+| `session.context_changed` | Context window changed | Useful for monitoring |
+| `session.usage_info` | Aggregate session usage | Session-wide stats |
+| `session.task_complete` | Agent considers the task complete | Useful in managed workflows |
+| `session.shutdown` | Session is shutting down | Cleanup signal |
+
+### Permission, user input, and elicitation
+
+| Event | Purpose |
+| --- | --- |
+| `permission.requested` / `permission.completed` | Permission workflow around tool usage |
+| `user_input.requested` / `user_input.completed` | Agent is asking the user a question |
+| `elicitation.requested` / `elicitation.completed` | UI form/dialog requests |
+
+### Sub-agent and skill events
+
+| Event | Purpose |
+| --- | --- |
+| `subagent.started` / `subagent.completed` / `subagent.failed` | Sub-agent lifecycle |
+| `subagent.selected` / `subagent.deselected` | Agent selection state |
+| `skill.invoked` | A skill was loaded or used |
+
+### Other useful events
+
+| Event | Purpose |
+| --- | --- |
+| `abort` | In-flight work was cancelled |
+| `system.message` | Non-user/system message |
+| `external_tool.requested` / `external_tool.completed` | External tool bridging |
+| `exit_plan_mode.requested` / `exit_plan_mode.completed` | Plan-mode transition |
+| `command.queued` / `command.completed` | Custom slash command execution |
+
+## Streaming behavior
+
+- `streaming: true` adds delta events such as `assistant.message_delta`.
+- Final events like `assistant.message` still fire even when streaming is enabled.
+- Tool partial/progress events are often ephemeral and should be treated as live UI updates, not durable history.
+
+## Data access conventions by language
+
+| Concept | TypeScript | Python | Go | .NET | Java |
+| --- | --- | --- | --- | --- | --- |
+| Event type | `event.type` | `event.type` or `event.type.value` depending on API surface | `event.Type` | event class or `EventType` | event class |
+| Final text | `event.data.content` | `event.data.content` | `*event.Data.Content` | `evt.Data.Content` | `event.getData().content()` |
+| Delta text | `event.data.deltaContent` | `event.data.delta_content` | `*event.Data.DeltaContent` | `evt.Data.DeltaContent` | `event.getData().deltaContent()` |
+| Nil / null checks | optional chaining | Python `None` | pointer checks required | nullable strings | nullable accessors |
+
+## Practical guidance
+
+1. Use `assistant.message_delta` for live rendering.
+2. Use `assistant.message` for the final canonical text.
+3. Use `session.idle` to know when a turn is done.
+4. Use `assistant.usage` for per-call accounting and `session.usage_info` for session totals.
+5. If you need every detail for audits or replay, store the full event stream from `getMessages()`.
