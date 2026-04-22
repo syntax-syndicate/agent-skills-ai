@@ -78,6 +78,13 @@
       "category": "development"
     },
     {
+      "name": "monologue-notes-api",
+      "source": "./plugins/monologue-notes-api",
+      "description": "Use this skill when the user wants to read or search their Monologue notes through the Monologue Notes REST API. It covers authentication with the MONOLOGUE_API_KEY environment variable, safe token handling, listing notes, fetching a single note, pagination, filters, and error handling. The API is read-only and should be accessed with direct HTTP requests such as curl or any equivalent REST client.",
+      "version": "0.1.1776844761",
+      "category": "productivity"
+    },
+    {
       "name": "nano-banana-2",
       "source": "./plugins/nano-banana-2",
       "description": "Generate and edit images using Google's Nano Banana 2 (Gemini 3.1 Flash Image Preview) API. This skill should be used when the user asks to create or modify images, especially when they need fast iteration, explicit aspect-ratio control, or resolution control from 512px to 4K.",
